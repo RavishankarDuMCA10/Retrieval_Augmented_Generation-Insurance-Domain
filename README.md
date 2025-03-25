@@ -1,7 +1,7 @@
-# Retrieval-Augmented Generation (RAG) Pipeline(PDF Processing) using ChromaDB for Insurance Domain
+# Retrieval-Augmented Generation (RAG) with Semantic Search using ChromaDB for Insurance Policies
 
 ## Overview
-This project provides an end-to-end solution for processing PDF files, extracting text and tables, storing and embedding them in a vector database, and performing retrieval-augmented generation (RAG) using OpenAI's embeddings and ChromaDB.
+This repository demonstrates a pipeline for Retrieval-Augmented Generation (RAG) applied to the insurance domain. The system enables efficient retrieval and generation of information from insurance-related documents, such as policy documents, claims records, and regulatory guidelines. It leverages OpenAI's text embedding model, ChromaDB for vector storage, and a cross-encoder for reranking. The approach integrates PDF processing, semantic search with caching, and re-ranking, leading to more accurate and contextually relevant responses.
 
 ## Table of Contents
 - [Installation](#installation)
@@ -11,115 +11,104 @@ This project provides an end-to-end solution for processing PDF files, extractin
 - [Re-Ranking with a Cross Encoder](#re-ranking-with-a-cross-encoder)
 - [Retrieval-Augmented Generation](#retrieval-augmented-generation)
 - [Results](#results)
+- [Technologies Used](#technologies-used)
+- [Conclusions](#conclusions)
+- [Acknowledgements](#acknowledgements)
 
 ## Installation
-Ensure you have the required libraries installed before running the code:
+Install all the required libraries:
 ```bash
-pip install -U pdfplumber tiktoken openai chromaDB sentence-transformers
+pip install -U pdfplumber tiktoken openai chromadb sentence-transformers
 ```
 
-## PDF Processing
-### Reading and Extracting Text from PDFs
-We use `pdfplumber` to read PDF files, extract text, and identify tables. This helps us preprocess documents for further analysis.
-
-#### Reading a Single PDF File
+Import the necessary libraries:
 ```python
 import pdfplumber
-
-pdf_path = "path/to/pdf.pdf"
-with pdfplumber.open(pdf_path) as pdf:
-    page = pdf.pages[6]  # Extract a specific page
-    text = page.extract_text()
-    tables = page.extract_tables()
-    print(text, tables)
-```
-
-#### Extracting Text from Multiple PDFs
-We define a function to extract and structure text from multiple PDFs.
-```python
 from pathlib import Path
 import pandas as pd
 import json
+import tiktoken
+import openai
+import chromadb
+```
 
+## PDF Processing
+### Extracting text from a PDF
+This project uses `pdfplumber` to extract text and tables from PDFs efficiently.
+```python
+with pdfplumber.open('sample.pdf') as pdf:
+    page = pdf.pages[0]
+    text = page.extract_text()
+    print(text)
+```
+### Extracting text from multiple PDFs
+A function to extract text from multiple PDFs and store them in a DataFrame.
+```python
 def extract_text_from_pdf(pdf_path):
     extracted_text = []
     with pdfplumber.open(pdf_path) as pdf:
         for i, page in enumerate(pdf.pages):
-            text = page.extract_text()
-            extracted_text.append([f"Page {i+1}", text])
+            extracted_text.append([f'Page {i+1}', page.extract_text()])
     return extracted_text
-
-pdf_directory = Path("/path/to/pdf/folder")
-data = []
-for pdf_file in pdf_directory.glob("*.pdf"):
-    extracted_text = extract_text_from_pdf(pdf_file)
-    df = pd.DataFrame(extracted_text, columns=['Page No.', 'Text'])
-    df['Document Name'] = pdf_file.name
-    data.append(df)
-
-all_pdfs_data = pd.concat(data, ignore_index=True)
 ```
 
 ## Generating and Storing Embeddings
-### Using OpenAI for Text Embeddings
-We use OpenAI’s `text-embedding-ada-002` model to convert text into embeddings and store them in a ChromaDB collection.
+Using OpenAI's `text-embedding-ada-002` model to generate embeddings and store them in ChromaDB.
 ```python
-import openai
-import chromadb
 from chromadb.utils.embedding_functions import OpenAIEmbeddingFunction
 
-openai.api_key = "your_openai_api_key"
-client = chromadb.PersistentClient(path="/path/to/chromadb")
 embedding_function = OpenAIEmbeddingFunction(api_key=openai.api_key, model_name="text-embedding-ada-002")
+client = chromadb.PersistentClient(path='rag_chromadb')
 
-collection = client.get_or_create_collection(name='InsuranceDocs', embedding_function=embedding_function)
-collection.add(documents=all_pdfs_data['Text'].tolist(),
-               ids=[str(i) for i in range(len(all_pdfs_data))],
-               metadatas=all_pdfs_data[['Page No.', 'Document Name']].to_dict(orient='records'))
+collection = client.get_or_create_collection(name='Insurance_Policies', embedding_function=embedding_function)
 ```
 
 ## Semantic Search with Cache
-To optimize retrieval, we first search a cache and then the main collection.
+Using ChromaDB for efficient semantic search with caching.
 ```python
-query = input("Enter your search query: ")
-cache_collection = client.get_or_create_collection(name='InsuranceCache', embedding_function=embedding_function)
-
-cache_results = cache_collection.query(query_texts=[query], n_results=1)
-if not cache_results['documents'][0]:
-    results = collection.query(query_texts=[query], n_results=10)
-    cache_collection.add(documents=[query], ids=[query], metadatas={'results': results})
-    print("Results from main collection:", results)
-else:
-    print("Results from cache:", cache_results['documents'])
+def semantic_search(query, n_results=10):
+    results = collection.query(query_texts=[query], n_results=n_results)
+    return results
 ```
 
 ## Re-Ranking with a Cross Encoder
-To improve ranking, we use a cross-encoder model from `sentence-transformers`.
+Re-ranking results using `cross-encoder/ms-marco-MiniLM-L-6-v2`.
 ```python
 from sentence_transformers import CrossEncoder
 cross_encoder = CrossEncoder('cross-encoder/ms-marco-MiniLM-L-6-v2')
 
-scores = cross_encoder.predict([[query, doc] for doc in results['documents'][0]])
-results_df['Re-rank Score'] = scores
-results_df = results_df.sort_values(by='Re-rank Score', ascending=False)
+def rerank_results(query, results):
+    pairs = [[query, result] for result in results['documents'][0]]
+    scores = cross_encoder.predict(pairs)
+    ranked_results = sorted(zip(results['documents'][0], scores), key=lambda x: x[1], reverse=True)
+    return ranked_results
 ```
 
 ## Retrieval-Augmented Generation
-Finally, we pass top-ranked results to GPT-3.5 to generate an answer.
+Combining the retrieved documents with GPT-3.5 to generate a response.
 ```python
-def generate_response(query, results_df):
+def generate_response(query, top_results):
     messages = [
-        {"role": "system", "content": "You are an insurance assistant."},
-        {"role": "user", "content": f"Answer the query: {query} using {results_df.head(3).to_dict()}"}
+        {"role": "system", "content": "You are an expert in insurance policies and claims."},
+        {"role": "user", "content": f"Based on the following insurance documents, answer: {query}\n{top_results}"}
     ]
     response = openai.ChatCompletion.create(model="gpt-3.5-turbo", messages=messages)
     return response["choices"][0]["message"]["content"]
-
-print(generate_response(query, results_df))
 ```
 
 ## Results
-The system retrieves relevant pages, ranks them, and generates responses using OpenAI’s GPT-3.5. This enhances document search capabilities, especially for structured text like insurance policies.
+The pipeline enhances response accuracy for insurance-related queries by integrating document retrieval with advanced LLM processing. It is particularly useful for policy document retrieval, claims analysis, and regulatory compliance assistance.
 
----
-This project enables efficient retrieval and summarization of PDF documents using advanced NLP techniques.
+## Technologies Used
+- Python
+- OpenAI API
+- pdfplumber
+- ChromaDB
+- Sentence Transformers
+
+## Conclusions
+This approach improves the efficiency and accuracy of retrieving and generating insights from insurance-related documents. It facilitates better decision-making in insurance underwriting, claims management, and policy analysis.
+
+## Acknowledgements
+Thanks to OpenAI, ChromaDB, Upgrad and the NLP community for their contributions.
+
